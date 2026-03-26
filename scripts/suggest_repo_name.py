@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import subprocess
 import sys
 import urllib.error
 import urllib.request
@@ -9,6 +10,7 @@ from pathlib import Path
 
 MAX_TEXT_CHARS = 4000
 MODEL_FALLBACK = "gpt-4.1-mini"
+LOCAL_CMD_ENV = "REPO_NAME_LOCAL_AI_CMD"
 
 
 def read_text_file(path: Path, limit: int = MAX_TEXT_CHARS) -> str:
@@ -22,7 +24,7 @@ def read_text_file(path: Path, limit: int = MAX_TEXT_CHARS) -> str:
     except Exception:
         return ""
 
-    return content[:limit].strip()
+    return content.lstrip("\ufeff")[:limit].strip()
 
 
 def find_first(root: Path, patterns: list[str]) -> list[Path]:
@@ -151,6 +153,44 @@ def request_repo_name(summary: str) -> str:
     return extract_message_content(payload)
 
 
+def request_repo_name_from_local_ai(summary: str, project_path: Path) -> str:
+    command_template = os.environ.get(LOCAL_CMD_ENV, "").strip()
+    if not command_template:
+        return ""
+
+    project_name = project_path.name
+    command = command_template.format(
+        project_path=str(project_path),
+        project_name=project_name,
+    )
+    prompt = (
+        "Suggest one concise English GitHub repository name for this software project.\n"
+        "Return only one slug using lowercase letters, digits, and hyphens.\n"
+        "No explanation.\n\n"
+        f"{summary}\n"
+    )
+
+    try:
+        completed = subprocess.run(
+            command,
+            input=prompt,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="ignore",
+            timeout=60,
+            shell=True,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return ""
+
+    if completed.returncode != 0:
+        return ""
+
+    return completed.stdout.strip()
+
+
 def main() -> int:
     if len(sys.argv) < 2:
         return 1
@@ -161,6 +201,8 @@ def main() -> int:
 
     summary = summarize_project(project_path)
     suggestion = request_repo_name(summary)
+    if not suggestion:
+        suggestion = request_repo_name_from_local_ai(summary, project_path)
     slug = sanitize_slug(suggestion)
     if not slug:
         return 1

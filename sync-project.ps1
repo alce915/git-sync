@@ -178,7 +178,9 @@ function Get-AiSuggestedRepoName {
         [string]$ProjectName
     )
 
-    if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
+    $hasOpenAiKey = -not [string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)
+    $hasLocalAiCommand = -not [string]::IsNullOrWhiteSpace($env:REPO_NAME_LOCAL_AI_CMD)
+    if (-not $hasOpenAiKey -and -not $hasLocalAiCommand) {
         return $null
     }
 

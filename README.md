@@ -39,6 +39,7 @@ GITHUB_TOKEN=YOUR_PAT
 OPENAI_API_KEY=YOUR_OPENAI_API_KEY
 # OPENAI_MODEL=gpt-4.1-mini
 # OPENAI_BASE_URL=https://api.openai.com/v1
+# REPO_NAME_LOCAL_AI_CMD=ollama run qwen2.5:7b
 ```
 
 ### Token 配置方式
@@ -79,8 +80,9 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 1. 已有 `origin` / `git-remote.json` / `projects.json` 中登记的仓库名
 2. `<工具根目录>\repo-name-overrides.json` 中的手工映射
 3. 如果配置了 `OPENAI_API_KEY`，根据项目目录名、README 和项目清单自动生成英文仓库名
-4. 对中文项目目录名自动生成拼音 slug，例如 `币安自动开单系统` -> `bi-an-zi-dong-kai-dan-xi-tong`
-5. 如果仍然无法生成，则退回安全的 ASCII 名称或时间戳名称
+4. 如果没有 `OPENAI_API_KEY`，但配置了本地 AI 命令，会把项目摘要发送给本地命令起英文名
+5. 对中文项目目录名自动生成拼音 slug，例如 `币安自动开单系统` -> `bi-an-zi-dong-kai-dan-xi-tong`
+6. 如果仍然无法生成，则退回安全的 ASCII 名称或时间戳名称
 
 如果你希望某个项目使用更自然的英文仓库名，可以创建本地文件 `<工具根目录>\repo-name-overrides.json`：
 ```json
@@ -94,6 +96,8 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 - `repo-name-overrides.json` 默认不会提交到公开仓库
 - AI 命名依赖本机可用的 `py -3`、`OPENAI_API_KEY`，以及可访问的 OpenAI 兼容接口
 - AI 命名会优先读取项目目录名、`README.md` 和 `package.json` / `pyproject.toml` / `*.csproj` 等项目清单来起名
+- 如果没有 OpenAI key，可以在 `git-sync.local.env` 中配置 `REPO_NAME_LOCAL_AI_CMD`，脚本会把命名提示词通过标准输入发送给该命令，并读取标准输出作为仓库名
+- `REPO_NAME_LOCAL_AI_CMD` 支持普通命令，或带 `{project_path}` / `{project_name}` 占位符的命令模板
 - 自动拼音转换依赖本机可用的 `py -3` 和 `pypinyin`
 
 ## 默认会忽略的敏感文件
