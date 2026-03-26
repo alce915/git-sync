@@ -16,6 +16,7 @@
 - `git-sync.env`：可提交的默认配置，只放非敏感值和参考格式
 - `git-sync.local.env`：本机私有覆盖配置，专门保存明文 Token 等敏感值
 - `projects.json`：本机运行时登记文件，不提交到公开仓库
+- `repo-name-overrides.json`：本机仓库名覆盖表，可把中文项目目录映射成你想要的英文仓库名
 
 ## 配置文件
 脚本会按下面顺序解析配置：
@@ -69,6 +70,25 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 
 说明：`projects.json`、`git-remote.json`、`git-sync.local.env` 都是本地运行状态或敏感配置，默认加入 `.gitignore`，不会进入公开仓库。
 
+## 中文项目名转仓库名
+如果你没有显式传 `-RepoName`，脚本会按下面顺序决定 GitHub 仓库名：
+1. 已有 `origin` / `git-remote.json` / `projects.json` 中登记的仓库名
+2. `<工具根目录>\repo-name-overrides.json` 中的手工映射
+3. 对中文项目目录名自动生成拼音 slug，例如 `币安自动开单系统` -> `bi-an-zi-dong-kai-dan-xi-tong`
+4. 如果仍然无法生成，则退回安全的 ASCII 名称或时间戳名称
+
+如果你希望某个项目使用更自然的英文仓库名，可以创建本地文件 `<工具根目录>\repo-name-overrides.json`：
+```json
+{
+  "币安自动开单系统": "binance-paired-opener",
+  "亢龙监控": "monitoring-dashboard"
+}
+```
+
+说明：
+- `repo-name-overrides.json` 默认不会提交到公开仓库
+- 自动拼音转换依赖本机可用的 `py -3` 和 `pypinyin`
+
 ## 默认会忽略的敏感文件
 - `.env`
 - `config/active_account.json`
@@ -76,6 +96,7 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 - `git-sync.local.env`
 - `projects.json`
 - `git-remote.json`
+- `repo-name-overrides.json`
 - 数据库、日志、虚拟环境等
 
 说明：`config/binance_api.env` 不会被忽略，因为公开仓库需要保留模板文件；但脚本会扫描文本文件中的真实密钥、Token、密码赋值并阻止继续同步。
@@ -106,7 +127,7 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 ## 参数说明
 - `-ProjectPath`：项目路径，默认当前目录
 - `-GitHubUser`：GitHub 用户名；不传时按“本地覆盖 -> 公共配置 -> 环境变量”解析
-- `-RepoName`：远程仓库名，默认等于项目目录名
+- `-RepoName`：远程仓库名；不传时默认等于项目目录名，若目录名包含中文则会优先尝试转成 ASCII 仓库名
 - `-Visibility public|private`：创建远程仓库时使用
 - `-CreateRemote`：如果 GitHub 上仓库不存在，则自动创建
 - `-GitHubToken`：可直接传 PAT；不传时按“本地覆盖 -> 公共配置 -> 环境变量”解析

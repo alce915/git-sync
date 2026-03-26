@@ -21,6 +21,8 @@ $scriptRoot = Split-Path -Parent $MyInvocation.MyCommand.Path
 $defaultEnvFile = Join-Path $scriptRoot 'git-sync.env'
 $localEnvFile = Join-Path $scriptRoot 'git-sync.local.env'
 $projectsRegistryPath = Join-Path $scriptRoot 'projects.json'
+$repoNameOverridesPath = Join-Path $scriptRoot 'repo-name-overrides.json'
+$repoNameTransliteratorPath = Join-Path $scriptRoot 'scripts\transliterate_repo_name.py'
 $processGitHubUser = $env:GITHUB_USER
 $processGitHubToken = $env:GITHUB_TOKEN
 
@@ -82,8 +84,129 @@ function Resolve-ConfiguredValue {
     return $FallbackValue
 }
 
+function Get-RepoNameOverrides {
+    if (-not (Test-Path $repoNameOverridesPath)) {
+        return @{}
+    }
+
+    try {
+        $raw = Get-Content -Raw -Path $repoNameOverridesPath
+        if ([string]::IsNullOrWhiteSpace($raw)) {
+            return @{}
+        }
+
+        $parsed = $raw | ConvertFrom-Json -AsHashtable
+        if ($parsed) {
+            return $parsed
+        }
+    } catch {
+        Write-Step "Ignoring unreadable repo name overrides file: $repoNameOverridesPath"
+    }
+
+    return @{}
+}
+
+function Test-ContainsCjk {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $false
+    }
+
+    return [regex]::IsMatch($Value, '[\p{IsCJKUnifiedIdeographs}]')
+}
+
+function ConvertTo-RepoSlug {
+    param([string]$Value)
+
+    if ([string]::IsNullOrWhiteSpace($Value)) {
+        return $null
+    }
+
+    $slug = $Value.ToLowerInvariant()
+    $slug = [regex]::Replace($slug, '[^a-z0-9]+', '-')
+    $slug = [regex]::Replace($slug, '-{2,}', '-')
+    $slug = $slug.Trim('-')
+
+    if ([string]::IsNullOrWhiteSpace($slug)) {
+        return $null
+    }
+
+    if ($slug.Length -gt 100) {
+        $slug = $slug.Substring(0, 100).Trim('-')
+    }
+
+    return $slug
+}
+
+function Get-RepoNameFromOverrides {
+    param(
+        [hashtable]$Overrides,
+        [string]$ProjectName
+    )
+
+    if (-not $Overrides -or [string]::IsNullOrWhiteSpace($ProjectName)) {
+        return $null
+    }
+
+    if ($Overrides.ContainsKey($ProjectName)) {
+        return ConvertTo-RepoSlug -Value ([string]$Overrides[$ProjectName])
+    }
+
+    return $null
+}
+
+function Get-TransliteratedRepoName {
+    param([string]$ProjectName)
+
+    if (-not (Test-Path $repoNameTransliteratorPath)) {
+        return $null
+    }
+
+    try {
+        $output = Invoke-External -FilePath 'py' -Arguments @('-3', $repoNameTransliteratorPath, $ProjectName) -AllowFailure -SuppressOutput
+        return ConvertTo-RepoSlug -Value $output
+    } catch {
+        return $null
+    }
+}
+
+function Get-AutoRepoName {
+    param(
+        [string]$ProjectName,
+        [hashtable]$Overrides
+    )
+
+    $overrideRepoName = Get-RepoNameFromOverrides -Overrides $Overrides -ProjectName $ProjectName
+    if ($overrideRepoName) {
+        Write-Step "Using repo name override for project '$ProjectName' -> $overrideRepoName"
+        return $overrideRepoName
+    }
+
+    $asciiSlug = ConvertTo-RepoSlug -Value $ProjectName
+    if (-not (Test-ContainsCjk -Value $ProjectName)) {
+        return $asciiSlug
+    }
+
+    $transliteratedRepoName = Get-TransliteratedRepoName -ProjectName $ProjectName
+    if ($transliteratedRepoName) {
+        Write-Step "Auto-generated ASCII repo name from Chinese project name '$ProjectName' -> $transliteratedRepoName"
+        return $transliteratedRepoName
+    }
+
+    if ($asciiSlug) {
+        Write-Step "Using sanitized ASCII repo name for '$ProjectName' -> $asciiSlug"
+        return $asciiSlug
+    }
+
+    $fallbackRepoName = 'project-' + (Get-Date -Format 'yyyyMMdd-HHmmss')
+    Write-Step "Could not transliterate project name '$ProjectName'; falling back to $fallbackRepoName. Pass -RepoName or add repo-name-overrides.json for a better English name."
+    return $fallbackRepoName
+}
+
 $defaultEnvValues = Read-EnvFile -Path $defaultEnvFile
 $localEnvValues = Read-EnvFile -Path $localEnvFile
+$repoNameOverrides = Get-RepoNameOverrides
 Import-EnvValues -Values $defaultEnvValues
 Import-EnvValues -Values $localEnvValues
 
@@ -310,6 +433,7 @@ function Ensure-GitIgnore {
         'git-sync.local.env',
         'projects.json',
         'git-remote.json',
+        'repo-name-overrides.json',
         $endMarker
     )
     $block = $blockLines -join [Environment]::NewLine
@@ -558,6 +682,7 @@ if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
 }
 
 $resolvedProject = (Resolve-Path -LiteralPath $ProjectPath).Path
+$projectName = Split-Path -Leaf $resolvedProject
 $gitDir = Join-Path $resolvedProject '.git'
 $registeredProjectInfo = Get-RegisteredProjectInfo -RepoRoot $resolvedProject
 $registeredRemoteInfo = if ($registeredProjectInfo) { Get-GitHubRemoteInfo -RemoteUrl $registeredProjectInfo.git_remote_url } else { $null }
@@ -574,7 +699,7 @@ if (-not $RepoName) {
     if ($inferredRemoteInfo) {
         $RepoName = $inferredRemoteInfo.repo
     } else {
-        $RepoName = Split-Path -Leaf $resolvedProject
+        $RepoName = Get-AutoRepoName -ProjectName $projectName -Overrides $repoNameOverrides
     }
 }
 if (-not $CommitMessage) {
