@@ -22,6 +22,7 @@ $defaultEnvFile = Join-Path $scriptRoot 'git-sync.env'
 $localEnvFile = Join-Path $scriptRoot 'git-sync.local.env'
 $projectsRegistryPath = Join-Path $scriptRoot 'projects.json'
 $repoNameOverridesPath = Join-Path $scriptRoot 'repo-name-overrides.json'
+$repoNameAiSuggesterPath = Join-Path $scriptRoot 'scripts\suggest_repo_name.py'
 $repoNameTransliteratorPath = Join-Path $scriptRoot 'scripts\transliterate_repo_name.py'
 $processGitHubUser = $env:GITHUB_USER
 $processGitHubToken = $env:GITHUB_TOKEN
@@ -171,8 +172,37 @@ function Get-TransliteratedRepoName {
     }
 }
 
+function Get-AiSuggestedRepoName {
+    param(
+        [string]$ProjectPath,
+        [string]$ProjectName
+    )
+
+    if ([string]::IsNullOrWhiteSpace($env:OPENAI_API_KEY)) {
+        return $null
+    }
+
+    if (-not (Test-Path $repoNameAiSuggesterPath)) {
+        return $null
+    }
+
+    try {
+        $output = Invoke-External -FilePath 'py' -Arguments @('-3', $repoNameAiSuggesterPath, $ProjectPath) -AllowFailure -SuppressOutput
+        $suggestedRepoName = ConvertTo-RepoSlug -Value $output
+        if ($suggestedRepoName) {
+            return $suggestedRepoName
+        }
+        Write-Step "AI repo naming produced no usable result for '$ProjectName'; falling back to rule-based naming"
+        return $null
+    } catch {
+        Write-Step "AI repo naming failed for '$ProjectName'; falling back to rule-based naming"
+        return $null
+    }
+}
+
 function Get-AutoRepoName {
     param(
+        [string]$ProjectPath,
         [string]$ProjectName,
         [hashtable]$Overrides
     )
@@ -181,6 +211,12 @@ function Get-AutoRepoName {
     if ($overrideRepoName) {
         Write-Step "Using repo name override for project '$ProjectName' -> $overrideRepoName"
         return $overrideRepoName
+    }
+
+    $aiSuggestedRepoName = Get-AiSuggestedRepoName -ProjectPath $ProjectPath -ProjectName $ProjectName
+    if ($aiSuggestedRepoName) {
+        Write-Step "AI-generated repo name for project '$ProjectName' -> $aiSuggestedRepoName"
+        return $aiSuggestedRepoName
     }
 
     $asciiSlug = ConvertTo-RepoSlug -Value $ProjectName
@@ -699,7 +735,7 @@ if (-not $RepoName) {
     if ($inferredRemoteInfo) {
         $RepoName = $inferredRemoteInfo.repo
     } else {
-        $RepoName = Get-AutoRepoName -ProjectName $projectName -Overrides $repoNameOverrides
+        $RepoName = Get-AutoRepoName -ProjectPath $resolvedProject -ProjectName $projectName -Overrides $repoNameOverrides
     }
 }
 if (-not $CommitMessage) {
