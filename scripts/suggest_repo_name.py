@@ -1,6 +1,7 @@
 import json
 import os
 import re
+import shlex
 import subprocess
 import sys
 import urllib.error
@@ -159,10 +160,18 @@ def request_repo_name_from_local_ai(summary: str, project_path: Path) -> str:
         return ""
 
     project_name = project_path.name
-    command = command_template.format(
-        project_path=str(project_path),
-        project_name=project_name,
-    )
+    try:
+        command_parts = shlex.split(command_template, posix=False)
+    except ValueError:
+        return ""
+
+    command = [
+        part.replace("{project_path}", str(project_path)).replace("{project_name}", project_name)
+        for part in command_parts
+    ]
+    if not command:
+        return ""
+
     prompt = (
         "Suggest one concise English GitHub repository name for this software project.\n"
         "Return only one slug using lowercase letters, digits, and hyphens.\n"
@@ -179,7 +188,7 @@ def request_repo_name_from_local_ai(summary: str, project_path: Path) -> str:
             encoding="utf-8",
             errors="ignore",
             timeout=60,
-            shell=True,
+            shell=False,
             check=False,
         )
     except (OSError, subprocess.SubprocessError):

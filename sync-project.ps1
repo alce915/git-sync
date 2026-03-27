@@ -1,4 +1,4 @@
-﻿param(
+param(
     [string]$ProjectPath = (Get-Location).Path,
     [string]$GitHubUser = $env:GITHUB_USER,
     [string]$RepoName,
@@ -85,6 +85,40 @@ function Resolve-ConfiguredValue {
     return $FallbackValue
 }
 
+function ConvertTo-Hashtable {
+    param([object]$Value)
+
+    if ($null -eq $Value) {
+        return $null
+    }
+
+    if ($Value -is [System.Collections.IDictionary]) {
+        $result = @{}
+        foreach ($key in $Value.Keys) {
+            $result[[string]$key] = ConvertTo-Hashtable -Value $Value[$key]
+        }
+        return $result
+    }
+
+    if ($Value -is [System.Management.Automation.PSCustomObject]) {
+        $result = @{}
+        foreach ($property in $Value.PSObject.Properties) {
+            $result[$property.Name] = ConvertTo-Hashtable -Value $property.Value
+        }
+        return $result
+    }
+
+    if ($Value -is [System.Collections.IEnumerable] -and -not ($Value -is [string])) {
+        $items = @()
+        foreach ($item in $Value) {
+            $items += ,(ConvertTo-Hashtable -Value $item)
+        }
+        return $items
+    }
+
+    return $Value
+}
+
 function Get-RepoNameOverrides {
     if (-not (Test-Path $repoNameOverridesPath)) {
         return @{}
@@ -96,7 +130,7 @@ function Get-RepoNameOverrides {
             return @{}
         }
 
-        $parsed = $raw | ConvertFrom-Json -AsHashtable
+        $parsed = ConvertTo-Hashtable -Value ($raw | ConvertFrom-Json)
         if ($parsed) {
             return $parsed
         }
@@ -215,15 +249,15 @@ function Get-AutoRepoName {
         return $overrideRepoName
     }
 
+    $asciiSlug = ConvertTo-RepoSlug -Value $ProjectName
+    if (-not (Test-ContainsCjk -Value $ProjectName)) {
+        return $asciiSlug
+    }
+
     $aiSuggestedRepoName = Get-AiSuggestedRepoName -ProjectPath $ProjectPath -ProjectName $ProjectName
     if ($aiSuggestedRepoName) {
         Write-Step "AI-generated repo name for project '$ProjectName' -> $aiSuggestedRepoName"
         return $aiSuggestedRepoName
-    }
-
-    $asciiSlug = ConvertTo-RepoSlug -Value $ProjectName
-    if (-not (Test-ContainsCjk -Value $ProjectName)) {
-        return $asciiSlug
     }
 
     $transliteratedRepoName = Get-TransliteratedRepoName -ProjectName $ProjectName
@@ -414,6 +448,53 @@ function Get-GitLocalConfigValue {
     return $value
 }
 
+function Get-GitEffectiveConfigValue {
+    param(
+        [string]$Name,
+        [string]$RepoRoot = $resolvedProject
+    )
+
+    $gitDir = Join-Path $RepoRoot '.git'
+    if (-not (Test-Path $gitDir)) {
+        return $null
+    }
+
+    $value = Invoke-Git -Arguments @('config', '--get', $Name) -AllowFailure -RunInDryRun -SuppressOutput
+    if ([string]::IsNullOrWhiteSpace($value)) {
+        return $null
+    }
+
+    return $value
+}
+
+function Ensure-LocalGitIdentity {
+    param(
+        [string]$FallbackName,
+        [string]$FallbackEmail
+    )
+
+    if ($DryRun) {
+        return
+    }
+
+    $effectiveName = Get-GitEffectiveConfigValue -Name 'user.name' -RepoRoot $resolvedProject
+    $effectiveEmail = Get-GitEffectiveConfigValue -Name 'user.email' -RepoRoot $resolvedProject
+
+    if ($effectiveName -and $effectiveEmail) {
+        return
+    }
+
+    if (-not $effectiveName -and $FallbackName) {
+        Write-Step "Configuring repo-local git user.name -> $FallbackName"
+        Invoke-Git -Arguments @('config', '--local', 'user.name', $FallbackName)
+    }
+
+    if (-not $effectiveEmail -and $FallbackEmail) {
+        Write-Step "Configuring repo-local git user.email -> $FallbackEmail"
+        Invoke-Git -Arguments @('config', '--local', 'user.email', $FallbackEmail)
+    }
+}
+
 function Get-GitHubRemoteInfo {
     param([string]$RemoteUrl)
 
@@ -502,7 +583,23 @@ function Ensure-GitIgnore {
 }
 
 function Get-CandidateFiles {
-    $listed = Invoke-Git -Arguments @('ls-files', '--cached', '--others', '--exclude-standard') -RunInDryRun -SuppressOutput
+    $gitDir = Join-Path $resolvedProject '.git'
+    if (-not (Test-Path $gitDir)) {
+        return @(
+            Get-ChildItem -LiteralPath $resolvedProject -Recurse -File -Force -ErrorAction SilentlyContinue |
+            Where-Object { $_.FullName -notmatch '[\\/]\.git([\\/]|$)' } |
+            ForEach-Object {
+                $fullPath = $_.FullName
+                if ($fullPath.StartsWith($resolvedProject, [System.StringComparison]::OrdinalIgnoreCase)) {
+                    $relativePath = $fullPath.Substring($resolvedProject.Length).TrimStart('\')
+                    $relativePath -replace '\\', '/'
+                }
+            } |
+            Where-Object { -not [string]::IsNullOrWhiteSpace($_) }
+        )
+    }
+
+    $listed = Invoke-Git -Arguments @('-c', 'core.quotepath=false', 'ls-files', '--cached', '--others', '--exclude-standard') -AllowFailure -RunInDryRun -SuppressOutput
     if ([string]::IsNullOrWhiteSpace($listed)) {
         return @()
     }
@@ -560,13 +657,13 @@ function Test-SensitiveFiles {
 
     foreach ($relative in $candidates) {
         $full = Join-Path $RepoRoot $relative
-        if (-not (Test-Path $full)) { continue }
+        if (-not (Test-Path -LiteralPath $full)) { continue }
         $fileName = [IO.Path]::GetFileName($relative)
         if ($ignoredNamePatterns -contains $fileName) { continue }
         $extension = [IO.Path]::GetExtension($relative)
         if ($ignoredExtensions -contains $extension) { continue }
         try {
-            $raw = Get-Content -Raw -Path $full -ErrorAction Stop
+            $raw = Get-Content -Raw -LiteralPath $full -ErrorAction Stop
         } catch {
             continue
         }
@@ -747,6 +844,9 @@ if ([string]::IsNullOrWhiteSpace($GitHubUser)) {
     throw 'GitHubUser is required. Pass -GitHubUser, set GITHUB_USER, or fill git-sync.env.'
 }
 
+$defaultGitUserName = if ($existingLocalGitUserName) { $existingLocalGitUserName } elseif ($GitHubUser) { $GitHubUser } else { $null }
+$defaultGitUserEmail = if ($existingLocalGitUserEmail) { $existingLocalGitUserEmail } elseif ($GitHubUser) { "$GitHubUser@users.noreply.github.com" } else { $null }
+
 $remoteHttps = if ($inferredRemoteInfo -and -not (Test-BoundParameter 'RepoName') -and -not (Test-BoundParameter 'GitHubUser')) {
     $inferredRemoteInfo.normalized_url
 } else {
@@ -826,14 +926,33 @@ try {
         }
     }
 
+    if (Test-Path $gitDir) {
+        Ensure-LocalGitIdentity -FallbackName $defaultGitUserName -FallbackEmail $defaultGitUserEmail
+    }
+
     if (-not $SkipCommit) {
-        Invoke-Git -Arguments @('add', '.')
-        $status = Invoke-Git -Arguments @('status', '--porcelain') -RunInDryRun -SuppressOutput
-        if (-not [string]::IsNullOrWhiteSpace($status)) {
-            Write-Step "Creating commit: $CommitMessage"
-            Invoke-Git -Arguments @('commit', '-m', $CommitMessage)
+        if ($DryRun) {
+            Write-Step 'DRY RUN: git add .'
+            $status = if (Test-Path $gitDir) {
+                Invoke-Git -Arguments @('status', '--porcelain') -AllowFailure -RunInDryRun -SuppressOutput
+            } else {
+                'new repository'
+            }
+
+            if (-not [string]::IsNullOrWhiteSpace($status)) {
+                Write-Step "DRY RUN: create commit: $CommitMessage"
+            } else {
+                Write-Step 'DRY RUN: no changes to commit'
+            }
         } else {
-            Write-Step 'No changes to commit'
+            Invoke-Git -Arguments @('add', '.')
+            $status = Invoke-Git -Arguments @('status', '--porcelain') -RunInDryRun -SuppressOutput
+            if (-not [string]::IsNullOrWhiteSpace($status)) {
+                Write-Step "Creating commit: $CommitMessage"
+                Invoke-Git -Arguments @('commit', '-m', $CommitMessage)
+            } else {
+                Write-Step 'No changes to commit'
+            }
         }
     }
 
@@ -846,7 +965,11 @@ try {
 
     $shouldRestorePublicInit = $false
 
-    Write-ProjectRegistry -RepoRoot $resolvedProject -RemoteUrl $remoteHttps -VisibilityValue $Visibility -Branch $DefaultBranch
+    if (-not $DryRun -and -not $SkipPush) {
+        Write-ProjectRegistry -RepoRoot $resolvedProject -RemoteUrl $remoteHttps -VisibilityValue $Visibility -Branch $DefaultBranch
+    } else {
+        Write-Step 'Skipping registry update because the push was skipped or this was a dry run'
+    }
 
     if ($publicInitBackupDir -and -not $DryRun -and (Test-Path $publicInitBackupDir)) {
         Remove-Item -LiteralPath $publicInitBackupDir -Recurse -Force

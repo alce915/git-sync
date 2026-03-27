@@ -1,4 +1,4 @@
-# Codex Git Sync Tool
+﻿# Codex Git Sync Tool
 
 这个工具可以放在任意目录使用，不要求固定放在 `D:\codex`。
 
@@ -79,10 +79,11 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 如果你没有显式传 `-RepoName`，脚本会按下面顺序决定 GitHub 仓库名：
 1. 已有 `origin` / `git-remote.json` / `projects.json` 中登记的仓库名
 2. `<工具根目录>\repo-name-overrides.json` 中的手工映射
-3. 如果配置了 `OPENAI_API_KEY`，根据项目目录名、README 和项目清单自动生成英文仓库名
-4. 如果没有 `OPENAI_API_KEY`，但配置了本地 AI 命令，会把项目摘要发送给本地命令起英文名
-5. 对中文项目目录名自动生成拼音 slug，例如 `币安自动开单系统` -> `bi-an-zi-dong-kai-dan-xi-tong`
-6. 如果仍然无法生成，则退回安全的 ASCII 名称或时间戳名称
+3. 如果项目目录名不含中文，直接使用安全的 ASCII slug
+4. 如果项目目录名包含中文，且配置了 `OPENAI_API_KEY`，根据项目目录名、README 和项目清单自动生成英文仓库名
+5. 如果项目目录名包含中文，且没有 `OPENAI_API_KEY` 但配置了本地 AI 命令，会把项目摘要发送给本地命令起英文名
+6. 对中文项目目录名自动生成拼音 slug，例如 `币安自动开单系统` -> `bi-an-zi-dong-kai-dan-xi-tong`
+7. 如果仍然无法生成，则退回安全的 ASCII 名称或时间戳名称
 
 如果你希望某个项目使用更自然的英文仓库名，可以创建本地文件 `<工具根目录>\repo-name-overrides.json`：
 ```json
@@ -97,7 +98,7 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 - AI 命名依赖本机可用的 `py -3`、`OPENAI_API_KEY`，以及可访问的 OpenAI 兼容接口
 - AI 命名会优先读取项目目录名、`README.md` 和 `package.json` / `pyproject.toml` / `*.csproj` 等项目清单来起名
 - 如果没有 OpenAI key，可以在 `git-sync.local.env` 中配置 `REPO_NAME_LOCAL_AI_CMD`，脚本会把命名提示词通过标准输入发送给该命令，并读取标准输出作为仓库名
-- `REPO_NAME_LOCAL_AI_CMD` 支持普通命令，或带 `{project_path}` / `{project_name}` 占位符的命令模板
+- `REPO_NAME_LOCAL_AI_CMD` 支持普通命令，或带 `{project_path}` / `{project_name}` 占位符的命令模板；占位符会作为普通参数传入，不经过 shell 展开
 - 自动拼音转换依赖本机可用的 `py -3` 和 `pypinyin`
 
 ## 默认会忽略的敏感文件
@@ -123,7 +124,7 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\your-project"
 ```
 
-说明：如果不传 `-RepoName`，脚本会优先沿用项目已有的 `origin`、`git-remote.json` 或 `projects.json` 中登记的仓库名，不会再默认把远端改成目录名。
+说明：如果不传 `-RepoName`，脚本会优先沿用项目已有的 `origin`、`git-remote.json` 或 `projects.json` 中登记的仓库名；只有在项目目录名包含中文时，才会继续尝试手工映射、AI 命名或拼音回退。
 
 ### 2.1 工具自身首次公开同步
 ```powershell
@@ -170,5 +171,6 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 
 ## 说明
 - 第一次用 HTTPS 推送时，如果本机没有缓存 GitHub 凭据，脚本会优先使用 `git-sync.local.env`、命令行参数或用户环境变量中的 PAT。
+- `projects.json` 和 `git-remote.json` 只会在真正完成 push 后更新；`-SkipPush` 和 `-DryRun` 不会写入同步登记。
 - 公开仓库中应只保留干净的 `git-sync.env`，不要把真实 Token 写回可提交文件。
 - 已经写入过磁盘或公开历史的 API Key / PAT，请先轮换后再同步。
