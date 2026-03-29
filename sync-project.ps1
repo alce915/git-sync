@@ -85,6 +85,50 @@ function Resolve-ConfiguredValue {
     return $FallbackValue
 }
 
+function Resolve-ConfiguredValueInfo {
+    param(
+        [string]$Name,
+        [hashtable]$DefaultValues,
+        [hashtable]$LocalValues,
+        [string]$FallbackValue,
+        [string]$ExplicitValue,
+        [switch]$WasExplicit
+    )
+
+    if ($WasExplicit) {
+        return [pscustomobject]@{
+            Value = $ExplicitValue
+            Source = 'command line parameter'
+        }
+    }
+
+    if ($LocalValues.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace($LocalValues[$Name])) {
+        return [pscustomobject]@{
+            Value = $LocalValues[$Name]
+            Source = (Split-Path -Leaf $localEnvFile)
+        }
+    }
+
+    if ($DefaultValues.ContainsKey($Name) -and -not [string]::IsNullOrWhiteSpace($DefaultValues[$Name])) {
+        return [pscustomobject]@{
+            Value = $DefaultValues[$Name]
+            Source = (Split-Path -Leaf $defaultEnvFile)
+        }
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($FallbackValue)) {
+        return [pscustomobject]@{
+            Value = $FallbackValue
+            Source = 'process or user environment'
+        }
+    }
+
+    return [pscustomobject]@{
+        Value = $null
+        Source = 'not configured'
+    }
+}
+
 function ConvertTo-Hashtable {
     param([object]$Value)
 
@@ -282,12 +326,11 @@ $repoNameOverrides = Get-RepoNameOverrides
 Import-EnvValues -Values $defaultEnvValues
 Import-EnvValues -Values $localEnvValues
 
-if (-not $PSBoundParameters.ContainsKey('GitHubUser')) {
-    $GitHubUser = Resolve-ConfiguredValue -Name 'GITHUB_USER' -DefaultValues $defaultEnvValues -LocalValues $localEnvValues -FallbackValue $processGitHubUser
-}
-if (-not $PSBoundParameters.ContainsKey('GitHubToken')) {
-    $GitHubToken = Resolve-ConfiguredValue -Name 'GITHUB_TOKEN' -DefaultValues $defaultEnvValues -LocalValues $localEnvValues -FallbackValue $processGitHubToken
-}
+$gitHubUserInfo = Resolve-ConfiguredValueInfo -Name 'GITHUB_USER' -DefaultValues $defaultEnvValues -LocalValues $localEnvValues -FallbackValue $processGitHubUser -ExplicitValue $GitHubUser -WasExplicit:(Test-BoundParameter 'GitHubUser')
+$gitHubTokenInfo = Resolve-ConfiguredValueInfo -Name 'GITHUB_TOKEN' -DefaultValues $defaultEnvValues -LocalValues $localEnvValues -FallbackValue $processGitHubToken -ExplicitValue $GitHubToken -WasExplicit:(Test-BoundParameter 'GitHubToken')
+
+$GitHubUser = $gitHubUserInfo.Value
+$GitHubToken = $gitHubTokenInfo.Value
 
 function Join-Args([string[]]$Arguments) {
     return ($Arguments | ForEach-Object {
@@ -492,6 +535,48 @@ function Ensure-LocalGitIdentity {
     if (-not $effectiveEmail -and $FallbackEmail) {
         Write-Step "Configuring repo-local git user.email -> $FallbackEmail"
         Invoke-Git -Arguments @('config', '--local', 'user.email', $FallbackEmail)
+    }
+}
+
+function Write-GitHubAuthSummary {
+    param(
+        [string]$User,
+        [string]$UserSource,
+        [string]$Token,
+        [string]$TokenSource,
+        [bool]$NeedsToken
+    )
+
+    if (-not [string]::IsNullOrWhiteSpace($User)) {
+        Write-Step "GitHub auth user: $User (source: $UserSource)"
+    } else {
+        Write-Step "GitHub auth user: missing (source: $UserSource)"
+    }
+
+    if (-not [string]::IsNullOrWhiteSpace($Token)) {
+        Write-Step "GitHub auth token: available (source: $TokenSource)"
+    } elseif ($NeedsToken) {
+        Write-Step "GitHub auth token: missing (source: $TokenSource)"
+    } else {
+        Write-Step 'GitHub auth token: not required for this run'
+    }
+}
+
+function Assert-GitHubAuthReady {
+    param(
+        [string]$User,
+        [string]$UserSource,
+        [string]$Token,
+        [string]$TokenSource,
+        [bool]$NeedsToken
+    )
+
+    if ([string]::IsNullOrWhiteSpace($User)) {
+        throw "GitHubUser is required before syncing. Configure GITHUB_USER in $localEnvFile or $defaultEnvFile, set a process/user environment variable, or pass -GitHubUser."
+    }
+
+    if ($NeedsToken -and [string]::IsNullOrWhiteSpace($Token)) {
+        throw "GitHubToken is required before pushing or creating a GitHub remote. Configure GITHUB_TOKEN in $localEnvFile, set a process/user environment variable, or pass -GitHubToken. Resolved GitHub user: $User (source: $UserSource)."
     }
 }
 
@@ -829,6 +914,10 @@ $existingLocalGitUserEmail = Get-GitLocalConfigValue -Name 'user.email' -RepoRoo
 
 if (-not (Test-BoundParameter 'GitHubUser') -and $inferredRemoteInfo) {
     $GitHubUser = $inferredRemoteInfo.owner
+    $gitHubUserInfo = [pscustomobject]@{
+        Value = $GitHubUser
+        Source = 'existing GitHub remote metadata'
+    }
 }
 if (-not $RepoName) {
     if ($inferredRemoteInfo) {
@@ -840,12 +929,12 @@ if (-not $RepoName) {
 if (-not $CommitMessage) {
     $CommitMessage = 'public backup: ' + (Get-Date -Format 'yyyy-MM-dd HH:mm:ss')
 }
-if ([string]::IsNullOrWhiteSpace($GitHubUser)) {
-    throw 'GitHubUser is required. Pass -GitHubUser, set GITHUB_USER, or fill git-sync.env.'
-}
-
 $defaultGitUserName = if ($existingLocalGitUserName) { $existingLocalGitUserName } elseif ($GitHubUser) { $GitHubUser } else { $null }
 $defaultGitUserEmail = if ($existingLocalGitUserEmail) { $existingLocalGitUserEmail } elseif ($GitHubUser) { "$GitHubUser@users.noreply.github.com" } else { $null }
+$needsGitHubToken = (-not $SkipPush) -or $CreateRemote
+
+Assert-GitHubAuthReady -User $GitHubUser -UserSource $gitHubUserInfo.Source -Token $GitHubToken -TokenSource $gitHubTokenInfo.Source -NeedsToken:$needsGitHubToken
+Write-GitHubAuthSummary -User $GitHubUser -UserSource $gitHubUserInfo.Source -Token $GitHubToken -TokenSource $gitHubTokenInfo.Source -NeedsToken:$needsGitHubToken
 
 $remoteHttps = if ($inferredRemoteInfo -and -not (Test-BoundParameter 'RepoName') -and -not (Test-BoundParameter 'GitHubUser')) {
     $inferredRemoteInfo.normalized_url

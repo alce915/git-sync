@@ -28,6 +28,8 @@
 
 推荐把公开默认值和本地密钥拆开保存。
 
+真实 push 或 `-CreateRemote` 之前，脚本会先预检 `GitHubUser` 和 `GitHubToken`，并输出它们的来源；如果缺少必需凭据，会在修改仓库前直接报错，不会等到 push 失败后才提示。
+
 `git-sync.env` 示例：
 ```env
 GITHUB_USER=alce915
@@ -171,6 +173,7 @@ powershell -ExecutionPolicy Bypass -File .\sync-project.ps1 -ProjectPath "D:\you
 
 ## 说明
 - 第一次用 HTTPS 推送时，如果本机没有缓存 GitHub 凭据，脚本会优先使用 `git-sync.local.env`、命令行参数或用户环境变量中的 PAT。
+- 真实 push 或 `-CreateRemote` 需要预先配置 `GITHUB_TOKEN`；脚本不会再依赖系统里碰巧存在的 Git 凭据缓存来“试试看”。
 - `projects.json` 和 `git-remote.json` 只会在真正完成 push 后更新；`-SkipPush` 和 `-DryRun` 不会写入同步登记。
 - 公开仓库中应只保留干净的 `git-sync.env`，不要把真实 Token 写回可提交文件。
 - 已经写入过磁盘或公开历史的 API Key / PAT，请先轮换后再同步。
